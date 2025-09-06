@@ -508,6 +508,188 @@ footer {
   display: block !important;
 }
 
+/* Detail page styles */
+.detail-container {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.detail-title {
+  flex: 1;
+  margin-right: 20px;
+}
+
+.detail-price {
+  font-size: 24px;
+  font-weight: bold;
+  color: #2c3e50;
+  background-color: #f8f9fa;
+  padding: 10px 15px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.image-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 15px;
+  margin-bottom: 30px;
+}
+
+.gallery-image {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.gallery-image:hover {
+  transform: scale(1.02);
+}
+
+.main-image-container {
+  margin-bottom: 15px;
+}
+
+.main-image {
+  width: 100%;
+  max-height: 500px;
+  object-fit: contain;
+  border-radius: 5px;
+}
+
+.detail-section {
+  margin-bottom: 30px;
+}
+
+.detail-section h3 {
+  border-bottom: 1px solid #e9ecef;
+  padding-bottom: 10px;
+  margin-bottom: 15px;
+}
+
+.description {
+  white-space: pre-line;
+  line-height: 1.6;
+}
+
+.attributes-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 10px;
+}
+
+.attribute-item {
+  display: flex;
+  padding: 8px;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+}
+
+.attribute-label {
+  font-weight: bold;
+  margin-right: 10px;
+  color: #495057;
+  flex: 1;
+}
+
+.attribute-value {
+  flex: 2;
+}
+
+.map-container {
+  height: 400px;
+  border-radius: 5px;
+  overflow: hidden;
+  margin-bottom: 30px;
+}
+
+.posted-info {
+  font-style: italic;
+  color: #6c757d;
+  margin-bottom: 15px;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.action-button {
+  padding: 10px 15px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  text-align: center;
+  text-decoration: none;
+  flex: 1;
+  display: inline-block;
+}
+
+.back-button {
+  background-color: #6c757d;
+  color: white;
+}
+
+.ebay-button {
+  background-color: #e53238;
+  color: white;
+}
+
+.contact-button {
+  background-color: #28a745;
+  color: white;
+}
+
+.original-button {
+  background-color: #007bff;
+  color: white;
+}
+
+/* Image modal */
+.image-modal {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  padding-top: 50px;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background-color: rgba(0,0,0,0.9);
+}
+
+.modal-content {
+  margin: auto;
+  display: block;
+  max-width: 90%;
+  max-height: 80%;
+}
+
+.close-modal {
+  position: absolute;
+  top: 15px;
+  right: 35px;
+  color: #f1f1f1;
+  font-size: 40px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
 @media (max-width: 600px) {
   .listings-container {
     grid-template-columns: repeat(auto-fill, minmax(100%, 1fr));
@@ -529,5 +711,18 @@ footer {
   
   .page-buttons {
     justify-content: center;
+  }
+  
+  .detail-header {
+    flex-direction: column;
+  }
+  
+  .detail-price {
+    margin-top: 10px;
+    align-self: flex-start;
+  }
+  
+  .action-buttons {
+    flex-direction: column;
   }
 }

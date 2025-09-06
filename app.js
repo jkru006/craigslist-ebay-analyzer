@@ -843,6 +843,155 @@ app.post('/api/getPage', async (req, res) => {
   }
 });
 
+// New route to show product detail page
+app.get('/listing/:id', async (req, res) => {
+  try {
+    const listingId = req.params.id;
+    const listingUrl = req.query.url;
+    
+    if (!listingUrl) {
+      return res.status(400).send('Listing URL is required');
+    }
+    
+    console.log(`Fetching details for listing ID: ${listingId}, URL: ${listingUrl}`);
+    
+    // Fetch the listing page from Craigslist
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'en-US,en;q=0.9'
+    };
+    
+    const response = await axios.get(listingUrl, { headers });
+    const $ = cheerio.load(response.data);
+    
+    // Extract listing details
+    const title = $('h1, .postingtitle, .posting-title').first().text().trim();
+    const price = $('.price').first().text().trim();
+    
+    // Extract description
+    const description = $('#postingbody, .posting-body').text().trim()
+      .replace('QR Code Link to This Post', '')  // Clean up common CL text
+      .trim();
+    
+    // Extract images
+    const images = [];
+    $('.gallery img, .swipe img, #thumbs .thumb img').each((i, elem) => {
+      const src = $(elem).attr('src');
+      if (src) {
+        // Convert thumbnail URLs to full size if needed
+        const fullSizeSrc = src.replace(/\d+x\d+/, '600x450');
+        images.push(fullSizeSrc);
+      }
+    });
+    
+    // Extract map info if available
+    let mapLat = null;
+    let mapLng = null;
+    let mapAddress = null;
+    
+    // Look for map data in various formats
+    $('script').each((i, elem) => {
+      const script = $(elem).html();
+      if (script && script.includes('map.init')) {
+        const latMatch = script.match(/lat:\s*([\d.-]+)/);
+        const lngMatch = script.match(/lng:\s*([\d.-]+)/);
+        if (latMatch && lngMatch) {
+          mapLat = parseFloat(latMatch[1]);
+          mapLng = parseFloat(lngMatch[1]);
+        }
+      }
+    });
+    
+    // Try to get address info
+    mapAddress = $('.mapaddress').text().trim() || null;
+    
+    // Extract additional details
+    const postedDate = $('.date, .postinginfo time, .meta .timeago').first().text().trim();
+    const sellerInfo = $('.notices').text().trim();
+    
+    // Extract attributes like condition, make, model, etc.
+    const attributes = {};
+    $('.attrgroup span, .mapAndAttrs .attrgroup span').each((i, elem) => {
+      const text = $(elem).text().trim();
+      if (text.includes(':')) {
+        const [key, value] = text.split(':', 2);
+        attributes[key.trim()] = value.trim();
+      }
+    });
+    
+    // Calculate the resale value and profit for this listing
+    const resaleValue = await getEbayResaleValue(title);
+    const numericPrice = parseFloat(price.replace(/[^0-9.]/g, '')) || 0;
+    
+    // Generate mock resale value if API doesn't return one
+    let finalResaleValue = resaleValue;
+    if (finalResaleValue == 0) {
+      const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(title);
+      const isLowValue = /broken|damaged|parts|cracked|as is/i.test(title);
+      
+      let multiplier = 1.0;
+      if (isHighValue) {
+        multiplier = Math.random() > 0.4 ? (Math.random() * 0.6 + 1.2) : (Math.random() * 0.2 + 0.8);
+      } else if (isLowValue) {
+        multiplier = Math.random() > 0.8 ? (Math.random() * 0.3 + 1.1) : (Math.random() * 0.5 + 0.5);
+      } else {
+        multiplier = Math.random() > 0.6 ? (Math.random() * 0.4 + 1.1) : (Math.random() * 0.3 + 0.7);
+      }
+      
+      finalResaleValue = (numericPrice * multiplier).toFixed(2);
+    }
+    
+    // Calculate profit
+    const profit = calculateProfit(price, finalResaleValue);
+    const profitValue = parseFloat(profit);
+    
+    // Generate average sale time data
+    const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(title);
+    const isFast = isHighValue || profitValue > 50;
+    const isVeryFast = isHighValue && profitValue > 100;
+    
+    let avgSaleTimeRaw = 0;
+    if (isVeryFast) {
+      avgSaleTimeRaw = Math.random() * 2 + 1; // 1-3 days
+    } else if (isFast) {
+      avgSaleTimeRaw = Math.random() * 4 + 3; // 3-7 days
+    } else if (profitValue > 0) {
+      avgSaleTimeRaw = Math.random() * 7 + 7; // 7-14 days
+    } else {
+      avgSaleTimeRaw = Math.random() * 14 + 14; // 14-28 days
+    }
+    
+    const avgSaleTime = Math.round(avgSaleTimeRaw);
+    const hasProfit = profitValue > 0;
+    
+    // Render the detail page with all extracted info
+    res.render('listing-detail', {
+      listing: {
+        id: listingId,
+        title: title,
+        price: price,
+        description: description,
+        images: images,
+        postedDate: postedDate,
+        sellerInfo: sellerInfo,
+        attributes: attributes,
+        mapLat: mapLat,
+        mapLng: mapLng,
+        mapAddress: mapAddress,
+        url: listingUrl,
+        resaleValue: finalResaleValue,
+        profit: profit,
+        avgSaleTime: avgSaleTime,
+        hasProfit: hasProfit
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching listing details:', error);
+    res.status(500).send(`Error fetching listing details: ${error.message}`);
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });

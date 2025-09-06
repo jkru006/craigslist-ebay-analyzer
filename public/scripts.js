@@ -253,8 +253,8 @@ document.addEventListener('DOMContentLoaded', function() {
           </div>
         </div>
         <div class="listing-content">
-          <a href="${listing.link}" target="_blank" class="title">${listing.title}</a>
-          <div class="price-comparison" data-id="${listing.id}" data-title="${listing.title}" data-price="${listing.price}">
+          <a href="/listing/${listing.id}?url=${encodeURIComponent(listing.link)}" class="title">${listing.title}</a>
+          <div class="price-comparison" data-id="${listing.id}" data-title="${listing.title}" data-price="${listing.price}" data-url="${listing.link}"
             <div class="price-row">
               <span class="price-label">Craigslist Price:</span>
               <span class="price">${listing.price}</span>
