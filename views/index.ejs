@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Craigslist to eBay Resale Analyzer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/style.css">
+  
+  <% if (typeof isSearchButtonPressed !== 'undefined' && isSearchButtonPressed === true) { %>
+  <meta name="search-button-pressed" content="true">
+  <% } else { %>
+  <meta name="search-button-pressed" content="false">
+  <% } %>
+  
+  <% if (typeof initialLoad !== 'undefined') { %>
+  <meta name="initial-load" content="<%= initialLoad %>">
+  <% } %>
+  
+  <% if (typeof useSortedBackend !== 'undefined') { %>
+  <meta name="use-sorted-backend" content="<%= useSortedBackend %>">
+  <% } else { %>
+  <meta name="use-sorted-backend" content="false">
+  <% } %>
+  
+  <script src="/scripts.js" defer></script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Resale Value Analyzer</h1>
+      
+      <form class="search-form" id="searchForm" method="POST" action="/">
+        <input type="text" name="search" placeholder="Search for..." value="<%= typeof searchQuery !== 'undefined' ? searchQuery : 'laptop' %>">
+        
+        <input type="text" name="zipcode" placeholder="Enter Zipcode" value="<%= typeof zipcode !== 'undefined' ? zipcode : '94102' %>">
+        
+        <input type="number" name="budget" placeholder="Max Budget ($)" value="<%= typeof budget !== 'undefined' ? budget : '' %>" min="0" step="1">
+        
+        <button type="submit" id="searchButton">Search</button>
+        
+        <input type="hidden" name="isSearchButtonPressed" value="true">
+        <input type="hidden" name="page" id="currentPageInput" value="<%= typeof currentPage !== 'undefined' ? currentPage : 1 %>">
+        <input type="hidden" name="itemsPerPage" value="<%= typeof itemsPerPage !== 'undefined' ? itemsPerPage : 50 %>"
+      </form>
+    </div>
+    
+    <% if (typeof initialLoad !== 'undefined' && initialLoad === true) { %>
+      <div class="welcome-message">
+        <h2>Welcome to the Resale Value Analyzer</h2>
+        <p>Enter a search term and zipcode above, then click "Search" to find Craigslist listings with their potential eBay resale values.</p>
+        <div class="instructions">
+          <h3>How it works:</h3>
+          <ol>
+            <li>Enter what you're looking for (e.g., "laptop", "iphone", "furniture")</li>
+            <li>Enter your zipcode to find nearby listings</li>
+            <li>Click "Search" to fetch Craigslist listings</li>
+            <li>We'll check eBay for completed sales to estimate resale values</li>
+            <li>Results are ranked by profit potential (highest profit first)</li>
+          </ol>
+        </div>
+      </div>
+    <% } else { %>
+      <div class="status-info">
+        <p>Found <strong><%= typeof totalListings !== 'undefined' ? totalListings : listings.length %></strong> 
+          listings for "<%= typeof searchQuery !== 'undefined' ? searchQuery : 'laptop' %>" 
+          near zipcode <%= typeof zipcode !== 'undefined' ? zipcode : '94102' %></p>
+        <p class="region-info">Craigslist Region: <%= typeof region !== 'undefined' ? region : 'sfbay' %></p>
+        <% if (typeof budget !== 'undefined' && budget > 0) { %>
+          <p class="budget-info">Maximum Budget: $<%= budget %></p>
+        <% } %>
+        <p class="rank-info">Listings ranked by highest profit potential first</p>
+      </div>
+      
+      <% if (listings.length === 0) { %>
+        <div class="no-results">
+          <p>No listings found. Try a different search term or zipcode.</p>
+        </div>
+      <% } else { %>
+        <div class="loading-overlay" id="loadingOverlay">
+          <div class="loading-spinner"></div>
+          <p>Processing listings...</p>
+        </div>
+        
+        <div class="pagination-controls" id="paginationTop">
+          <div class="page-info">
+            Page <%= currentPage %> of <%= totalPages %>
+          </div>
+          <div class="page-buttons">
+            <% if (currentPage > 1) { %>
+              <button class="page-button" data-page="1">First</button>
+              <button class="page-button" data-page="<%= currentPage - 1 %>">Previous</button>
+            <% } %>
+            
+            <% 
+            // Show up to 5 page numbers, centered around current page
+            let topStartPage = Math.max(1, currentPage - 2);
+            let topEndPage = Math.min(totalPages, topStartPage + 4);
+            if (topEndPage - topStartPage < 4) {
+              topStartPage = Math.max(1, topEndPage - 4);
+            }
+            for (let i = topStartPage; i <= topEndPage; i++) { 
+            %>
+              <button class="page-button <%= i === currentPage ? 'active-page' : '' %>" data-page="<%= i %>"><%= i %></button>
+            <% } %>
+            
+            <% if (currentPage < totalPages) { %>
+              <button class="page-button" data-page="<%= currentPage + 1 %>">Next</button>
+              <button class="page-button" data-page="<%= totalPages %>">Last</button>
+            <% } %>
+          </div>
+          <div class="page-size-selector">
+            <label for="itemsPerPage">Items per page:</label>
+            <select id="itemsPerPage">
+              <option value="25" <%= itemsPerPage === 25 ? 'selected' : '' %>>25</option>
+              <option value="50" <%= itemsPerPage === 50 ? 'selected' : '' %>>50</option>
+              <option value="100" <%= itemsPerPage === 100 ? 'selected' : '' %>>100</option>
+            </select>
+          </div>
+        </div>
+        
+        <div class="listings-container" id="listingsContainer">
+          <% listings.forEach(function(listing, index) { 
+            // Calculate absolute index for ranking
+            const absoluteIndex = (currentPage - 1) * itemsPerPage + index; 
+          %>
+            <div class="listing initially-hidden" id="<%= listing.id %>">
+              <div class="profit-container no-profit">
+                <div class="profit-indicator">
+                  <span class="rank-badge">#<%= absoluteIndex + 1 %></span>
+                  <strong>Profit Potential:</strong> 
+                  <span class="profit-value-display">
+                    <span class="profit-value-container" data-id="<%= listing.id %>-indicator">
+                      <span class="no-profit-value">Loading...</span>
+                    </span>
+                  </span>
+                </div>
+              </div>
+              <div class="listing-content">
+                <a href="<%= listing.link %>" target="_blank" class="title"><%= listing.title %></a>
+                <div class="price-comparison" data-id="<%= listing.id %>" data-title="<%= listing.title %>" data-price="<%= listing.price %>">
+                  <div class="price-row">
+                    <span class="price-label">Craigslist Price:</span>
+                    <span class="price"><%= listing.price %></span>
+                  </div>
+                  <div class="price-row">
+                    <span class="price-label">eBay Resale Value:</span>
+                    <span class="resale-price">$<span class="resale-value">0</span></span>
+                    <span class="loading-indicator">Loading...</span>
+                  </div>
+                  <div class="price-row profit-row negative-profit">
+                    <span class="price-label">Potential Profit:</span>
+                    <span class="profit-amount">$<span class="profit-value">0</span></span>
+                  </div>
+                  <div class="sale-time-row">
+                    <span class="price-label">Avg. Sale Time:</span>
+                    <span class="avg-sale-time">Loading...</span>
+                  </div>
+                </div>
+                <% if (listing.location) { %>
+                  <div class="info-row">
+                    <span class="location"><%= listing.location %></span>
+                    <a href="https://www.ebay.com/sch/i.html?_nkw=<%= encodeURIComponent(listing.title.split('-')[0].trim()) %>&LH_Sold=1" target="_blank" class="ebay-link">Check on eBay</a>
+                  </div>
+                <% } %>
+              </div>
+            </div>
+          <% }); %>
+        </div>
+        
+        <div class="pagination-controls" id="paginationBottom">
+          <div class="page-info">
+            Page <%= currentPage %> of <%= totalPages %>
+          </div>
+          <div class="page-buttons">
+            <% if (currentPage > 1) { %>
+              <button class="page-button" data-page="1">First</button>
+              <button class="page-button" data-page="<%= currentPage - 1 %>">Previous</button>
+            <% } %>
+            
+            <% 
+            // Show up to 5 page numbers, centered around current page
+            let bottomStartPage = Math.max(1, currentPage - 2);
+            let bottomEndPage = Math.min(totalPages, bottomStartPage + 4);
+            if (bottomEndPage - bottomStartPage < 4) {
+              bottomStartPage = Math.max(1, bottomEndPage - 4);
+            }
+            for (let i = bottomStartPage; i <= bottomEndPage; i++) { 
+            %>
+              <button class="page-button <%= i === currentPage ? 'active-page' : '' %>" data-page="<%= i %>"><%= i %></button>
+            <% } %>
+            
+            <% if (currentPage < totalPages) { %>
+              <button class="page-button" data-page="<%= currentPage + 1 %>">Next</button>
+              <button class="page-button" data-page="<%= totalPages %>">Last</button>
+            <% } %>
+          </div>
+        </div>
+      <% } %>
+    <% } %>
+    
+    <footer>
+      <p>Craigslist to eBay Resale Analyzer - Find the best profit opportunities quickly!</p>
+    </footer>
+  </div>
+</body>
+</html>

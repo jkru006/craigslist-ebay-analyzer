@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: resale-analyzer
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: EBAY_APP_ID
+        sync: false
+      - key: EBAY_CERT_ID
+        sync: false
+      - key: EBAY_DEV_ID
+        sync: false
+      - key: EBAY_ENV
+        value: PRODUCTION
