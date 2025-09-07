@@ -4,6 +4,7 @@
   <title>Chebify</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/listing-modal.css">
   
   <% if (typeof isSearchButtonPressed !== 'undefined' && isSearchButtonPressed === true) { %>
   <meta name="search-button-pressed" content="true">
@@ -21,7 +22,9 @@
   <meta name="use-sorted-backend" content="false">
   <% } %>
   
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBDaeWicvigtP9xPv919E-RNoxfvC-Hqik" defer></script>
   <script src="/scripts.js" defer></script>
+  <script src="/listing-modal.js" defer></script>
 </head>
 <body>
   <div class="container">
@@ -135,7 +138,7 @@
                 </div>
               </div>
               <div class="listing-content">
-                <a href="/listing/<%= listing.id %>?url=<%= encodeURIComponent(listing.link) %>" class="title"><%= listing.title %></a>
+                <a href="/listing/<%= listing.id %>?url=<%= encodeURIComponent(listing.link) %>" class="title" data-listing-id="<%= listing.id %>" data-listing-url="<%= listing.link %>"><%= listing.title %></a>
                 <div class="price-comparison" data-id="<%= listing.id %>" data-title="<%= listing.title %>" data-price="<%= listing.price %>" data-url="<%= listing.link %>">
                   <div class="price-row">
                     <span class="price-label">Craigslist Price:</span>

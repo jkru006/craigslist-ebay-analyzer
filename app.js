@@ -18,6 +18,10 @@ const ebay = new EbayNodeApi({
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json()); // For API requests
 
+// Memory cache for eBay searches to avoid duplicate API calls
+const ebaySearchCache = {};
+const EBAY_CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
 // Helper function to get eBay resale value
 async function getEbayResaleValue(itemTitle) {
   try {
@@ -30,6 +34,14 @@ async function getEbayResaleValue(itemTitle) {
     if (!searchQuery || searchQuery.length < 3) {
       console.log(`Skipping eBay search for too short or generic term: ${cleanTitle}`);
       return 0;
+    }
+    
+    // Check cache first
+    const cacheKey = searchQuery.toLowerCase();
+    if (ebaySearchCache[cacheKey] && 
+        ebaySearchCache[cacheKey].timestamp > Date.now() - EBAY_CACHE_EXPIRY) {
+      console.log(`Using cached eBay data for: ${searchQuery}`);
+      return ebaySearchCache[cacheKey].value;
     }
     
     console.log(`Searching eBay for: ${searchQuery}`);
@@ -64,11 +76,16 @@ async function getEbayResaleValue(itemTitle) {
         console.log('eBay authentication successful');
       }
       
-      const response = await ebay.findCompletedItems(params);
+      // Set a timeout for the eBay API request
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('eBay API request timeout')), 10000)
+      );
       
-      // Debug the response
-      console.log('eBay API Response for', searchQuery, ':');
-      console.log(JSON.stringify(response).substring(0, 500) + '...'); // Log partial response
+      // Race the API request against the timeout
+      const response = await Promise.race([
+        ebay.findCompletedItems(params),
+        timeoutPromise
+      ]);
       
       // Process the response
       if (response && 
@@ -90,27 +107,55 @@ async function getEbayResaleValue(itemTitle) {
               item.sellingStatus[0].currentPrice && 
               item.sellingStatus[0].currentPrice[0]) {
             const price = parseFloat(item.sellingStatus[0].currentPrice[0].__value__);
-            console.log(`eBay sold item: ${item.title[0]} - Price: $${price}`);
             totalPrice += price;
             count++;
           }
         });
         
-        // Return average price or 0 if no items found
+        // Calculate average price or 0 if no items found
         const average = count > 0 ? (totalPrice / count).toFixed(2) : 0;
         console.log(`Average eBay price for ${searchQuery}: $${average}`);
+        
+        // Save to cache
+        ebaySearchCache[cacheKey] = {
+          timestamp: Date.now(),
+          value: average
+        };
+        
+        // Clean up old cache entries occasionally
+        if (Math.random() < 0.1) { // 10% chance to clean on each call
+          const now = Date.now();
+          Object.keys(ebaySearchCache).forEach(key => {
+            if (ebaySearchCache[key].timestamp < now - EBAY_CACHE_EXPIRY) {
+              delete ebaySearchCache[key];
+            }
+          });
+        }
+        
         return average;
       }
       
       console.log(`No completed listings found for: ${searchQuery}`);
+      
+      // Cache the empty result too to avoid repeated calls
+      ebaySearchCache[cacheKey] = {
+        timestamp: Date.now(),
+        value: 0
+      };
+      
       return 0;
     } catch (apiError) {
       console.error('eBay API error:', apiError.message);
+      
       // Try alternate method - get access token explicitly and retry
       try {
         console.log('Retrying with fresh authentication...');
         await ebay.getAccessToken();
-        const response = await ebay.findCompletedItems(params);
+        
+        const response = await Promise.race([
+          ebay.findCompletedItems(params),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Retry timeout')), 10000))
+        ]);
         
         if (response && 
             response.findCompletedItemsResponse && 
@@ -133,12 +178,32 @@ async function getEbayResaleValue(itemTitle) {
           
           const average = count > 0 ? (totalPrice / count).toFixed(2) : 0;
           console.log(`Average eBay price for ${searchQuery} (retry): $${average}`);
+          
+          // Save to cache
+          ebaySearchCache[cacheKey] = {
+            timestamp: Date.now(),
+            value: average
+          };
+          
           return average;
         }
+        
+        // Cache empty result
+        ebaySearchCache[cacheKey] = {
+          timestamp: Date.now(),
+          value: 0
+        };
         
         return 0;
       } catch (retryError) {
         console.error('eBay retry failed:', retryError.message);
+        
+        // Cache failure to avoid hammering the API
+        ebaySearchCache[cacheKey] = {
+          timestamp: Date.now(),
+          value: 0
+        };
+        
         return 0;
       }
     }
@@ -210,8 +275,23 @@ async function fetchCraigslistListings(searchQuery = 'laptop', zipcode = '94102'
     console.log(`Fetching listings from ${region} region for zipcode ${zipcode}`);
     console.log('URL:', url);
     
-    const response = await axios.get(url, { headers });
+    // Add timeout to prevent hanging requests
+    const response = await axios.get(url, { 
+      headers,
+      timeout: 15000, // 15 second timeout
+      maxRedirects: 5 // Allow up to 5 redirects
+    });
+    
     console.log('Response status:', response.status);
+    
+    if (response.status !== 200) {
+      throw new Error(`Craigslist returned status code ${response.status}`);
+    }
+    
+    // Check if we got a valid response
+    if (!response.data || typeof response.data !== 'string' || response.data.length < 100) {
+      throw new Error('Invalid response from Craigslist - empty or too small');
+    }
     
     const $ = cheerio.load(response.data);
     
@@ -219,10 +299,32 @@ async function fetchCraigslistListings(searchQuery = 'laptop', zipcode = '94102'
     const pageTitle = $('title').text();
     console.log('Page title:', pageTitle);
     
+    // Check if we've been blocked or got a captcha page
+    if (pageTitle.includes('blocked') || pageTitle.includes('denied') || 
+        $('body').text().includes('captcha') || $('body').text().includes('Attention Required')) {
+      throw new Error('Access to Craigslist appears to be blocked or requires captcha');
+    }
+    
     // Return the parsed data and cheerio instance for further processing
     return { $, baseUrl, pageTitle, searchQuery, zipcode, region };
   } catch (error) {
     console.error('Error fetching Craigslist data:', error.message);
+    
+    // Add specific error handling based on error type
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Connection to Craigslist timed out. Please try again later.');
+    } else if (error.code === 'ENOTFOUND') {
+      throw new Error('Unable to connect to Craigslist. Please check your internet connection.');
+    } else if (error.response) {
+      // The request was made and the server responded with a status code
+      // that falls out of the range of 2xx
+      throw new Error(`Craigslist returned error: ${error.response.status} - ${error.response.statusText}`);
+    } else if (error.request) {
+      // The request was made but no response was received
+      throw new Error('No response received from Craigslist. Please try again later.');
+    }
+    
+    // Re-throw the original error if none of the specific cases match
     throw error;
   }
 }
@@ -604,6 +706,10 @@ app.set('views', __dirname + '/views');
 // Serve static files from public folder
 app.use(express.static('public'));
 
+// Memory cache for search results
+const searchResultsCache = {};
+const SEARCH_CACHE_EXPIRY = 10 * 60 * 1000; // 10 minutes
+
 // API endpoint for getting all sorted and paginated listings
 app.post('/api/getAllSortedListings', async (req, res) => {
   try {
@@ -613,9 +719,17 @@ app.post('/api/getAllSortedListings', async (req, res) => {
       return res.status(400).json({ error: 'Search query and zipcode are required' });
     }
     
+    // Check cache first
+    const cacheKey = `${searchQuery}-${zipcode}-${budget || 0}`;
+    if (searchResultsCache[cacheKey] && 
+        searchResultsCache[cacheKey].timestamp > Date.now() - SEARCH_CACHE_EXPIRY) {
+      console.log(`Using cached search results for: ${searchQuery} in ${zipcode}`);
+      return res.json(searchResultsCache[cacheKey].data);
+    }
+    
     console.log(`Getting all sorted listings for: ${searchQuery} in ${zipcode}`);
     
-    // Fetch the data from Craigslist
+    // Fetch the data from Craigslist with a timeout
     const { $, baseUrl, pageTitle, region } = await fetchCraigslistListings(searchQuery, zipcode);
     
     let listings = [];
@@ -729,68 +843,98 @@ app.post('/api/getAllSortedListings', async (req, res) => {
       });
     }
     
-    // For each listing, calculate its resale value and profit
+    // Calculate resale values in parallel (with batching to avoid overloading)
+    const batchSize = 5; // Process 5 listings at a time
     const processedListings = [];
     
-    for (const listing of listings) {
-      // Get resale value for each listing
-      const resaleValue = await getEbayResaleValue(listing.title);
-      const numericPrice = parseFloat(listing.price.replace(/[^0-9.]/g, '')) || 0;
-      
-      // If API doesn't return value, generate mock data (same as the single API endpoint)
-      let finalResaleValue = resaleValue;
-      if (finalResaleValue == 0) {
-        const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(listing.title);
-        const isLowValue = /broken|damaged|parts|cracked|as is/i.test(listing.title);
+    // Helper function to process a single listing
+    const processListing = async (listing) => {
+      try {
+        // Get resale value for this listing
+        const resaleValue = await getEbayResaleValue(listing.title);
+        const numericPrice = parseFloat(listing.price.replace(/[^0-9.]/g, '')) || 0;
         
-        let multiplier = 1.0;
-        
-        if (isHighValue) {
-          multiplier = Math.random() > 0.4 ? 
-            (Math.random() * 0.6 + 1.2) :
-            (Math.random() * 0.2 + 0.8);
-        } else if (isLowValue) {
-          multiplier = Math.random() > 0.8 ? 
-            (Math.random() * 0.3 + 1.1) :
-            (Math.random() * 0.5 + 0.5);
-        } else {
-          multiplier = Math.random() > 0.6 ? 
-            (Math.random() * 0.4 + 1.1) :
-            (Math.random() * 0.3 + 0.7);
+        // If API doesn't return value, generate mock data
+        let finalResaleValue = resaleValue;
+        if (finalResaleValue == 0) {
+          const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(listing.title);
+          const isLowValue = /broken|damaged|parts|cracked|as is/i.test(listing.title);
+          
+          let multiplier = 1.0;
+          
+          if (isHighValue) {
+            multiplier = Math.random() > 0.4 ? 
+              (Math.random() * 0.6 + 1.2) :
+              (Math.random() * 0.2 + 0.8);
+          } else if (isLowValue) {
+            multiplier = Math.random() > 0.8 ? 
+              (Math.random() * 0.3 + 1.1) :
+              (Math.random() * 0.5 + 0.5);
+          } else {
+            multiplier = Math.random() > 0.6 ? 
+              (Math.random() * 0.4 + 1.1) :
+              (Math.random() * 0.3 + 0.7);
+          }
+          
+          finalResaleValue = (numericPrice * multiplier).toFixed(2);
         }
         
-        finalResaleValue = (numericPrice * multiplier).toFixed(2);
+        // Calculate profit
+        const profit = calculateProfit(listing.price, finalResaleValue);
+        const profitValue = parseFloat(profit);
+        
+        // Generate average sale time data
+        const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(listing.title);
+        const isFast = isHighValue || profitValue > 50;
+        const isVeryFast = isHighValue && profitValue > 100;
+        
+        let avgSaleTimeRaw = 0;
+        if (isVeryFast) {
+          avgSaleTimeRaw = Math.random() * 2 + 1; // 1-3 days
+        } else if (isFast) {
+          avgSaleTimeRaw = Math.random() * 4 + 3; // 3-7 days
+        } else if (profitValue > 0) {
+          avgSaleTimeRaw = Math.random() * 7 + 7; // 7-14 days
+        } else {
+          avgSaleTimeRaw = Math.random() * 14 + 14; // 14-28 days
+        }
+        
+        const avgSaleTime = Math.round(avgSaleTimeRaw);
+        
+        return {
+          ...listing,
+          resaleValue: finalResaleValue,
+          profit: profit,
+          avgSaleTime,
+          hasProfit: profitValue > 0
+        };
+      } catch (err) {
+        console.error(`Error processing listing "${listing.title}":`, err.message);
+        // Return the listing with default values on error
+        return {
+          ...listing,
+          resaleValue: '0',
+          profit: '0',
+          avgSaleTime: 0,
+          hasProfit: false,
+          error: true
+        };
       }
+    };
+    
+    // Process listings in batches
+    console.log(`Processing ${listings.length} listings in batches of ${batchSize}`);
+    for (let i = 0; i < listings.length; i += batchSize) {
+      const batch = listings.slice(i, i + batchSize);
+      console.log(`Processing batch ${i/batchSize + 1} of ${Math.ceil(listings.length/batchSize)}`);
       
-      // Calculate profit
-      const profit = calculateProfit(listing.price, finalResaleValue);
-      const profitValue = parseFloat(profit);
+      // Process this batch in parallel
+      const batchResults = await Promise.all(
+        batch.map(listing => processListing(listing))
+      );
       
-      // Generate average sale time data
-      const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(listing.title);
-      const isFast = isHighValue || profitValue > 50;
-      const isVeryFast = isHighValue && profitValue > 100;
-      
-      let avgSaleTimeRaw = 0;
-      if (isVeryFast) {
-        avgSaleTimeRaw = Math.random() * 2 + 1; // 1-3 days
-      } else if (isFast) {
-        avgSaleTimeRaw = Math.random() * 4 + 3; // 3-7 days
-      } else if (profitValue > 0) {
-        avgSaleTimeRaw = Math.random() * 7 + 7; // 7-14 days
-      } else {
-        avgSaleTimeRaw = Math.random() * 14 + 14; // 14-28 days
-      }
-      
-      const avgSaleTime = Math.round(avgSaleTimeRaw);
-      
-      processedListings.push({
-        ...listing,
-        resaleValue: finalResaleValue,
-        profit: profit,
-        avgSaleTime,
-        hasProfit: profitValue > 0
-      });
+      // Add results to processed listings
+      processedListings.push(...batchResults);
     }
     
     // Sort listings by profit (highest first)
@@ -801,14 +945,31 @@ app.post('/api/getAllSortedListings', async (req, res) => {
     });
     
     // Return all processed and sorted listings
-    res.json({
+    const responseData = {
       totalListings: processedListings.length,
       listings: processedListings
+    };
+    
+    // Store in cache
+    searchResultsCache[cacheKey] = {
+      timestamp: Date.now(),
+      data: responseData
+    };
+    
+    // Clean up old cache entries
+    const now = Date.now();
+    Object.keys(searchResultsCache).forEach(key => {
+      if (searchResultsCache[key].timestamp < now - SEARCH_CACHE_EXPIRY) {
+        delete searchResultsCache[key];
+      }
     });
     
-  } catch (error) {
-    console.error('API error:', error.message);
-    res.status(500).json({ error: error.message });
+    res.json(responseData);
+  } catch (fetchError) {
+    console.error('Error fetching listings:', fetchError.message);
+    
+    // Return error response
+    res.status(500).json({ error: fetchError.message });
   }
 });
 
@@ -843,7 +1004,7 @@ app.post('/api/getPage', async (req, res) => {
   }
 });
 
-// New route to show product detail page
+// New route to show product detail page (legacy - now we use modal)
 app.get('/listing/:id', async (req, res) => {
   try {
     const listingId = req.params.id;
@@ -989,6 +1150,241 @@ app.get('/listing/:id', async (req, res) => {
   } catch (error) {
     console.error('Error fetching listing details:', error);
     res.status(500).send(`Error fetching listing details: ${error.message}`);
+  }
+});
+
+// Simple memory cache for listing details
+const listingDetailsCache = {};
+const CACHE_EXPIRY = 60 * 60 * 1000; // 1 hour
+
+// New API endpoint to get listing details for the modal popup
+app.get('/api/listing-details', async (req, res) => {
+  try {
+    const listingId = req.query.id;
+    const listingUrl = req.query.url;
+    
+    if (!listingUrl) {
+      return res.status(400).json({ error: 'Listing URL is required' });
+    }
+    
+    // Check if we have a cached version
+    const cacheKey = `${listingId}-${listingUrl}`;
+    if (listingDetailsCache[cacheKey] && 
+        listingDetailsCache[cacheKey].timestamp > Date.now() - CACHE_EXPIRY) {
+      console.log(`API: Using cached details for listing ID: ${listingId}`);
+      return res.json(listingDetailsCache[cacheKey].data);
+    }
+    
+    console.log(`API: Fetching details for listing ID: ${listingId}, URL: ${listingUrl}`);
+    
+    // Fetch the listing page from Craigslist with timeout
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cache-Control': 'no-cache'
+    };
+    
+    const response = await axios.get(listingUrl, { headers });
+    const $ = cheerio.load(response.data);
+    
+    // Extract listing details
+    const title = $('h1, .postingtitle, .posting-title').first().text().trim();
+    const price = $('.price').first().text().trim();
+    
+    // Extract description and clean it up - use more specific selectors
+    let description = $('#postingbody, .posting-body').html();
+    
+    // If the main selectors didn't work, try alternative selectors
+    if (!description) {
+      description = $('.postingbody, .posting-body').html();
+    }
+    
+    // If we still don't have a description, try a more general approach
+    if (!description) {
+      // Look for content divs that might contain the description
+      const contentDivs = $('.content div:not(.gallery):not(.mapbox):not(.postinginfos):not(.notices)');
+      contentDivs.each((i, el) => {
+        const divContent = $(el).html();
+        if (divContent && divContent.length > 100) {
+          description = divContent;
+          return false; // Break the loop
+        }
+      });
+    }
+    
+    // Fallback message if no description found
+    if (!description) {
+      description = 'No description available. Please check the original listing for details.';
+    }
+    
+    // Clean up the description
+    if (description) {
+      // Remove "QR Code Link to This Post" text and surrounding whitespace
+      description = description.replace(/\s*QR Code Link to This Post\s*/gi, '');
+      
+      // Remove empty paragraphs and reduce multiple line breaks
+      description = description.replace(/(<p>\s*<\/p>)+/gi, '');
+      description = description.replace(/(<br>\s*<br>\s*<br>)+/gi, '<br><br>');
+      description = description.replace(/(\n\s*\n\s*\n)+/g, '\n\n');
+      
+      // Clean up any leftover whitespace at beginning/end
+      description = description.trim();
+      
+      // If the description is very short (possibly just the title), set a fallback
+      if (description.length < 30) {
+        description = 'No detailed description available. Please check the original listing for more information.';
+      }
+    }
+    
+    // Extract images
+    const images = [];
+    $('.gallery img, .swipe img, #thumbs .thumb img').each((i, elem) => {
+      const src = $(elem).attr('src');
+      if (src) {
+        // Convert thumbnail URLs to full size if needed
+        const fullSizeSrc = src.replace(/\d+x\d+/, '600x450');
+        if (!images.includes(fullSizeSrc)) {
+          images.push(fullSizeSrc);
+        }
+      }
+    });
+    
+    // If no images found in gallery, try to find them in other places
+    if (images.length === 0) {
+      $('img').each((i, elem) => {
+        const src = $(elem).attr('src');
+        if (src && src.includes('images.craigslist') && !images.includes(src)) {
+          const fullSizeSrc = src.replace('50x50c', '600x450');
+          images.push(fullSizeSrc);
+        }
+      });
+    }
+    
+    // Extract map info if available
+    let mapLat = null;
+    let mapLng = null;
+    let mapAddress = null;
+    
+    // Method 1: Look for data attributes
+    const mapDiv = $('#map');
+    if (mapDiv.length > 0) {
+      mapLat = mapDiv.data('latitude') || null;
+      mapLng = mapDiv.data('longitude') || null;
+    }
+    
+    // Method 2: Look for map data in scripts
+    if (!mapLat || !mapLng) {
+      $('script').each((i, elem) => {
+        const script = $(elem).html();
+        if (script) {
+          // Look for various formats
+          const latLngMatch1 = script.match(/var\s+map\s*=.*lat\s*:\s*([-+]?\d*\.\d+|\d+).*lng\s*:\s*([-+]?\d*\.\d+|\d+)/is);
+          const latLngMatch2 = script.match(/lat\s*[:=]\s*([-+]?\d*\.\d+|\d+).*lng\s*[:=]\s*([-+]?\d*\.\d+|\d+)/is);
+          const latLngMatch3 = script.match(/map\.init\(.*?([-+]?\d*\.\d+|\d+),\s*([-+]?\d*\.\d+|\d+)/is);
+          
+          if (latLngMatch1) {
+            mapLat = parseFloat(latLngMatch1[1]);
+            mapLng = parseFloat(latLngMatch1[2]);
+          } else if (latLngMatch2) {
+            mapLat = parseFloat(latLngMatch2[1]);
+            mapLng = parseFloat(latLngMatch2[2]);
+          } else if (latLngMatch3) {
+            mapLat = parseFloat(latLngMatch3[1]);
+            mapLng = parseFloat(latLngMatch3[2]);
+          }
+        }
+      });
+    }
+    
+    // Try to get address info
+    mapAddress = $('.mapaddress').text().trim() || null;
+    
+    // Extract additional details
+    const postedDate = $('.date, .postinginfo time, .meta .timeago').first().text().trim() || 
+                      $('.date').first().text().trim() || null;
+    const sellerInfo = $('.notices').text().trim() || null;
+    
+    // Extract attributes like condition, make, model, etc.
+    const attributes = {};
+    $('.attrgroup span, .mapAndAttrs .attrgroup span').each((i, elem) => {
+      const text = $(elem).text().trim();
+      if (text.includes(':')) {
+        const [key, value] = text.split(':', 2);
+        attributes[key.trim()] = value.trim();
+      }
+    });
+    
+    // Calculate the resale value and profit for this listing
+    const resaleValue = await getEbayResaleValue(title);
+    const numericPrice = parseFloat(price.replace(/[^0-9.]/g, '')) || 0;
+    
+    // Generate mock resale value if API doesn't return one
+    let finalResaleValue = resaleValue;
+    if (finalResaleValue == 0) {
+      const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(title);
+      const isLowValue = /broken|damaged|parts|cracked|as is/i.test(title);
+      
+      let multiplier = 1.0;
+      if (isHighValue) {
+        multiplier = Math.random() > 0.4 ? (Math.random() * 0.6 + 1.2) : (Math.random() * 0.2 + 0.8);
+      } else if (isLowValue) {
+        multiplier = Math.random() > 0.8 ? (Math.random() * 0.3 + 1.1) : (Math.random() * 0.5 + 0.5);
+      } else {
+        multiplier = Math.random() > 0.6 ? (Math.random() * 0.4 + 1.1) : (Math.random() * 0.3 + 0.7);
+      }
+      
+      finalResaleValue = (numericPrice * multiplier).toFixed(2);
+    }
+    
+    // Calculate profit
+    const profit = calculateProfit(price, finalResaleValue);
+    const profitValue = parseFloat(profit);
+    
+    // Generate average sale time data
+    const isHighValue = /macbook|iphone|ipad|pro|gaming|rtx|premium|new|sealed/i.test(title);
+    const isFast = isHighValue || profitValue > 50;
+    const isVeryFast = isHighValue && profitValue > 100;
+    
+    let avgSaleTimeRaw = 0;
+    if (isVeryFast) {
+      avgSaleTimeRaw = Math.random() * 2 + 1; // 1-3 days
+    } else if (isFast) {
+      avgSaleTimeRaw = Math.random() * 4 + 3; // 3-7 days
+    } else if (profitValue > 0) {
+      avgSaleTimeRaw = Math.random() * 7 + 7; // 7-14 days
+    } else {
+      avgSaleTimeRaw = Math.random() * 14 + 14; // 14-28 days
+    }
+    
+    const avgSaleTime = Math.round(avgSaleTimeRaw);
+    const hasProfit = profitValue > 0;
+    
+    // Return JSON response with all the data
+    res.json({
+      id: listingId,
+      url: listingUrl,
+      title: title,
+      price: price,
+      description: description,
+      images: images,
+      postedDate: postedDate,
+      sellerInfo: sellerInfo,
+      attributes: attributes,
+      mapLat: mapLat,
+      mapLng: mapLng,
+      mapAddress: mapAddress,
+      resaleValue: finalResaleValue,
+      profit: profit,
+      avgSaleTime: avgSaleTime,
+      hasProfit: hasProfit
+    });
+  } catch (error) {
+    console.error('API Error fetching listing details:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch listing details',
+      message: error.message
+    });
   }
 });
 
